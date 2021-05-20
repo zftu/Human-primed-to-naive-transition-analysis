@@ -1,1 +1,1 @@
-# primed-to-naive-analysis
+# Human primed-to-naive transition analysis
