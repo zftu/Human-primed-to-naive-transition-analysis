@@ -1,0 +1,155 @@
+---
+title: "PtoN_bulk_mRNAseq_analysis"
+author: "tuzhifen"
+date: "2021/5/20"
+output: html_document
+---
+
+## Load libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(DESeq2)
+library(ggrepel)
+library(limma)
+library(pheatmap)
+library(reshape2)
+```
+
+## Differential analysis of gene expression
+# "countsPLUSanno.RData" include genecounts and RNAseq_SampleAnno files
+# 8dAPRposOCT4neg_vs_8dAPRnegOCT4neg and 6dSSEA4neg_vs_6dSSEA4pos 
+
+```{r}
+load(file = "countsPLUSanno.RData")
+dds <- DESeqDataSetFromMatrix(countData=genecounts, colData=RNAseq_SampleAnno, design= ~condition)
+
+dds1 <- dds
+dds1$condition <- relevel(dds1$condition, ref = "8dAPRnegOCT4neg")
+dds1 <- DESeq(dds1)
+resultsNames(dds1)
+dds1_resLFC <- lfcShrink(dds1, coef="condition_8dAPRposOCT4neg_vs_8dAPRnegOCT4neg", type="apeglm")
+
+dds3 <- dds
+dds3$condition <- relevel(dds3$condition, ref = "6dSSEA4pos")
+dds3 <- DESeq(dds3)
+resultsNames(dds3)
+dds3_resLFC <- lfcShrink(dds3, coef="condition_6dSSEA4neg_vs_6dSSEA4pos", type="apeglm")
+```
+
+## MAplot
+
+```{r}
+base_mean <- as.data.frame(counts(dds3, normalized=TRUE))
+d6 = base_mean[colnames(base_mean) %in% c("6dSSEA4posRep1","6dSSEA4posRep2",
+                                          "6dSSEA4negRep1","6dSSEA4negRep2")]
+d6$mean = rowMeans(d6)
+d6 = merge(dds3_DEgenes,d6,by ='row.names')
+rownames(d6) = d6$Row.names
+d6 = select(d6,-1)
+genes = c("GATA4","GATA6","HAND1","FOXA2","NES",
+          "HOXB1","CDX2","COL3A1",
+          "RBP4","AFP",
+          "TBX15","HOXB9",
+          "FGFR2","SERPINH1")
+d6$label = ifelse(rownames(d6) %in% genes,rownames(d6),"")
+d6$condition = ifelse(d6$log2FoldChange >= 1 & d6$padj < 0.01,"UP",
+                      ifelse(d6$log2FoldChange <= -1 & d6$padj < 0.01,"DOWN","none"))
+d6$condition = ifelse(rownames(d6) %in% genes,"label",d6$condition)
+ggplot(d6,aes(x=mean,y=log2FoldChange)) +
+  geom_point(aes(color=condition,size = condition,alpha = condition),
+             show.legend = F) +
+  geom_hline(yintercept =  c(-1,1),lty=2,lwd = 1) +
+  theme_bw() + ggtitle("6d SSEA4neg VS 6d SSEA4pos") + 
+  scale_color_manual(values = c("blue","black","grey","red")) +
+  scale_size_manual(values = c(1.5,2.5,1.5,1.5)) +
+  scale_alpha_manual(values = c(0.6,1,0.6,0.6)) +
+  scale_x_log10() + 
+  theme(panel.grid=element_blank()) +
+  scale_y_continuous(limits = c(-8,8),breaks = c(-8,-6,-4,-2,0,2,4,6,8)) +
+  geom_text_repel(aes(label=label)) +
+  xlab("Mean Normalized Counts") + ylab("log2FoldChange")
+```
+
+## PCA analysis
+
+```{r}
+rld <- rlog(dds,blind = FALSE)
+pca_result_x <- plotPCA(rld,returnData=T)
+ggplot(pca_result_x,aes(x=PC1,y=PC2,color = RNAseq_SampleAnno$condition)) + 
+  geom_point(cex=7,alpha = 1) + 
+  theme_bw() + theme(panel.grid=element_blank()) + 
+  xlab("PC1: 71% variance") + ylab("PC2: 13% variance") +
+  scale_color_manual(values = rev(colorRampPalette(brewer.pal(11,"Spectral")[2:11])(15)))
+```
+
+## k-means clustering
+# "totalFPKM_mean" is the mean FPKM of our data
+
+```{r}
+load(file = "./FPKM.RData")
+FPKM_series = dplyr::select(totalFPKM_mean,c(1,3,5,8,11,14,15))
+FPKM_series = FPKM_series[apply(FPKM_series, 1, function(x){sum(x>=5)}) > 0,]
+FPKM_series_scale = t(scale(t(FPKM_series))) 
+set.seed(20)
+kClust <- kmeans(FPKM_series_scale, centers=6, nstart = 1000, iter.max = 20)
+kClusters <- kClust$cluster
+clust.centroid = function(i, dat, clusters) {
+  ind = (clusters == i)
+  colMeans(dat[ind,])
+}
+kClustcentroids <- sapply(levels(factor(kClusters)), clust.centroid, FPKM_series_scale, kClusters)
+Kmolten <- melt(kClustcentroids) 
+colnames(Kmolten) <- c('sample','cluster','value')
+ggplot(Kmolten, aes(x=sample,y=value, group=cluster, colour=as.factor(cluster))) + 
+  geom_point(cex=3) + 
+  geom_line(lwd=1.5) +
+  xlab("Time") +
+  ylab("Expression") +
+  labs(title= "Cluster Expression by Time",color = "Cluster")
+```
+
+## Integrated PCA analysis with published embryo RNAseq data
+# "tangFPKMlog" is the merged FPKM matrix of our data and published data
+# "pton_blastocyst_Anno" is metadata
+
+```{r}
+tangFPKMlog <- limma::removeBatchEffect(tangFPKMlog,c(pton_blastocyst_Anno$batch))
+hvg = rowSums((tangFPKMlog - rowMeans(tangFPKMlog))^2)/(nrow(tangFPKMlog)-1)
+hvg = order(hvg, decreasing = TRUE)[1:500]
+pca_result <- as.data.frame(tangFPKMlog[hvg,]) %>% t() %>% prcomp(center = TRUE,scale. = T)
+pca_result_x <- as.data.frame(pca_result$x)
+ggplot(pca_result_x,aes(x=PC1,y=PC2)) + 
+  geom_point(aes(color = pton_blastocyst_Anno$condition,
+                 shape = pton_blastocyst_Anno$batch),cex=7) +
+  theme_bw() + theme(panel.grid=element_blank()) + 
+  xlab("PC1: 55% variance") + ylab("PC2: 6% variance") + 
+  scale_color_manual(values = c(rev(colorRampPalette(brewer.pal(11,"Spectral")[2:11])(15)),
+                                brewer.pal(8,"Accent")[2],
+                                brewer.pal(12,"Set3")[10],
+                                brewer.pal(9,"Set1")[8],
+                                brewer.pal(12,"Set3")[7])) +
+  scale_shape_manual(values = c(16,18))
+```
+
+## Integrated PCA analysis with published TSCs RNAseq data
+# "plusElife" is the merged raw counts of our data and published data
+# "plusElife_Anno" is metadata
+
+```{r}
+vst <- vst(as.matrix(plusElife),blind = FALSE)
+vst_rm <- limma::removeBatchEffect(vst,c(plusElife_Anno$batch))
+pca_result <- as.data.frame(vst_rm) %>% t() %>% prcomp(center = TRUE,scale. = T)
+pca_result_x <- as.data.frame(pca_result$x)
+ggplot(pca_result_x,aes(x=PC1,y=PC2,color = plusElife_Anno$condition)) + 
+  geom_point(aes(shape = plusElife_Anno$batch),cex=9) + 
+  scale_shape_manual(values = c(16,18)) +
+  theme_bw() + theme(panel.grid=element_blank()) +
+  xlab("PC1: 18% variance") + ylab("PC1: 15% variance") +
+  scale_color_manual(values =c(rev(colorRampPalette(brewer.pal(11,"Spectral")[c(1:5,8:11)])(15)),
+                               colorRampPalette(brewer.pal(11,"PiYG")[c(11:8)])(8),
+                               colorRampPalette(brewer.pal(11,"PiYG")[c(4:1)])(6)))
+```
+

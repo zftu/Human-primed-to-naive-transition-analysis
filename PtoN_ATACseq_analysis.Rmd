@@ -1,0 +1,123 @@
+---
+title: "PtoN_ATACseq_analysis"
+author: "tuzhifen"
+date: "2021/5/21"
+output: html_document
+---
+
+## Load libraries
+
+```{r}
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+library(dplyr)
+library(ggplot2)
+library(RColorBrewer)
+library(limma)
+library(pheatmap)
+library(ChIPseeker)
+library(TxDb.Hsapiens.UCSC.hg38.knownGene)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+```
+
+## Peak annotation
+
+```{r}
+txdb <- TxDb.Hsapiens.UCSC.hg38.knownGene
+merge_peak <- readPeakFile(file.choose())
+merge_peak_Anno <- annotatePeak(merge_peak, tssRegion=c(-3000, 3000),TxDb=txdb, annoDb="org.Hs.eg.db")
+merge_peak_Anno <- na.omit(as.data.frame(merge_peak_Anno))
+colnames(merge_peak_Anno)[6:20] = c("10dAPRnegOCT4neg","10dAPRposOCT4neg","10dAPRposOCT4pos",
+                                    "12dAPRnegOCT4neg","12dAPRposOCT4neg","12dAPRposOCT4pos",
+                                    "14dAPRnegOCT4neg","14dAPRposOCT4neg","14dAPRposOCT4pos",
+                                    "6dSSEA4neg","6dSSEA4pos","8dAPRnegOCT4neg","8dAPRposOCT4neg",
+                                    "nES","pES")
+merge_peak_Anno = merge_peak_Anno[merge_peak_Anno$seqnames %in% c(paste("chr",1:22,sep = ""),"chrX","chrY"),]
+```
+
+## PCA analysis
+
+```{r}
+merge_peak_RPKM = merge_peak_Anno[,6:20]
+merge_peak_RPKM = merge_peak_RPKM[(apply(merge_peak_RPKM, 1, function(x){
+  sum(x > 15)}) > 2),]
+merge_peak_RPKM = log2(merge_peak_RPKM + 1)
+sample_anno = data.frame(samplename = colnames(merge_peak_RPKM),batch = factor(c(rep(1,13),rep(2,2))))
+rownames(sample_anno) = sample_anno$samplename
+merge_peak_RPKM_rmbat = as.data.frame(limma::removeBatchEffect(merge_peak_RPKM,c(sample_anno$batch)))
+pca_result <- merge_peak_RPKM_rmbat %>% t() %>% prcomp(center = TRUE,scale. = T)
+pca_result_x <- as.data.frame(pca_result$x)
+ggplot(pca_result_x,aes(x=PC1,y=PC2,color = sample_anno$samplename)) + 
+  geom_point(cex=6) + 
+  geom_text_repel(aes(label=sample_anno$samplename),size = 3.5) + 
+  theme_bw()
+```
+
+## Bubble plot
+# prepare motif_final data 
+
+```{r}
+motif_final[motif_final$logvalue > 1500,3] = 1500
+motif_final[motif_final$logvalue < 50,3] = 50 
+motif_final[motif_final$FPKM > 25,4] = 25
+motif_final$name = factor(motif_final$name,levels = c("POU5F1","SOX2","SOX15","KLF4","KLF5",
+                       "TFAP2C","TEAD1","TEAD2","TEAD3","TEAD4",
+                       "GATA2","GATA3","GATA4","GATA6",
+                       "JUN","JUNB","FOS","FOSL2","ATF3","CTCF"))
+motif_final$variable = factor(motif_final$variable,levels = rev(c("pES","6dSSEA4pos","6dSSEA4neg","8dAPRposOCT4neg",
+                                                        "10dAPRposOCT4neg","10dAPRposOCT4pos",
+                                                        "12dAPRposOCT4neg","12dAPRposOCT4pos",
+                                                        "14dAPRposOCT4neg","14dAPRposOCT4pos","nES",
+                                                        "8dAPRnegOCT4neg","10dAPRnegOCT4neg",
+                                                        "12dAPRnegOCT4neg","14dAPRnegOCT4neg")))
+ggplot(motif_final,aes(x=motif_final$name,y=motif_final$variable)) +
+  geom_point(aes(size= motif_final$FPKM,colour = motif_final$logvalue)) +
+  scale_color_gradient(low = 'blue', high = 'red',n.breaks = 6) +
+  theme_classic() +
+  theme(panel.grid=element_blank()) + 
+  scale_size(range = c(1,12),limits  = c(0,25))
+```
+
+## CAD plot
+
+```{r}
+peak = merge_peak_Anno
+peak$name = paste("A",1:340729,sep = "")
+rownames(peak) = peak$name
+peak1 = peak[,6:20]
+CAD_all = dplyr::select(peak1,c(13,10,9,11,12,2,3,4,5,7,8,15))
+CAD_all = log2(CAD_all + 1)
+PO_all = subset(CAD_all,
+                CAD_all$pES > log2(15.22) &
+                  CAD_all$`6dSSEA4pos` > log2(15.22) &
+                  CAD_all$`6dSSEA4neg` > log2(15.22) &
+                  CAD_all$`8dAPRnegOCT4neg` > log2(15.22) &
+                  CAD_all$`8dAPRposOCT4neg` > log2(15.22) &
+                  CAD_all$`10dAPRposOCT4neg` > log2(15.22) &
+                  CAD_all$`10dAPRposOCT4pos` > log2(15.22) &
+                  CAD_all$`12dAPRposOCT4neg` > log2(15.22) &
+                  CAD_all$`12dAPRposOCT4pos` > log2(15.22) &
+                  CAD_all$`14dAPRposOCT4neg` > log2(15.22) &
+                  CAD_all$`14dAPRposOCT4pos` > log2(15.22) &
+                  CAD_all$nES > log2(15.22))
+# OC1_all,OC2_all......CO10_all,CO11_all
+test = lapply(list(PO_all,OC1_all,OC2_all,OC3_all,OC4_all,OC5_all,OC6_all,
+                   OC7_all,OC8_all,OC9_all,OC10_all,OC11_all,
+                   PC_all,CO1_all,CO2_all,CO3_all,CO4_all,CO5_all,CO6_all,
+                   CO7_all,CO8_all,CO9_all,CO10_all,CO11_all), function(x){
+  x$mean = apply(x,1,mean)
+  x$name = rownames(x)
+  x = arrange(x,desc(x$mean))})
+for (i in c(2:12,22,24)){
+  test[[i]] = arrange(test[[i]],test[[i]]$mean)  
+}
+sort_all = do.call(rbind,test)
+bk = unique(c(seq(2,8,length=7)))
+pheatmap(sort_all[,1:12],
+         show_rownames = F,
+         cluster_cols = F,
+         cluster_rows = F,
+         color = c("#000004FF","#280B54FF","#D44842FF","#F57D15FF","#FB9E07FF","#FAC127FF"),
+         breaks = bk)
+```
