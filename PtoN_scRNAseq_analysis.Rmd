@@ -1,0 +1,175 @@
+---
+title: "PtoN_scRNAseq_analysis"
+author: "tuzhifen"
+date: "2021/5/22"
+output: html_document
+---
+
+## Load libraries
+
+```{r}
+rm(list = ls())
+options(stringsAsFactors = FALSE)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(RColorBrewer)
+library(monocle)
+```
+
+## Create Seurat object and quality control
+
+```{r}
+d6 <- Read10X(data.dir = "./pton10XscRNAseq/d6_filtered_feature_bc_matrix/")
+d8 <- Read10X(data.dir = "./pton10XscRNAseq/d8_filtered_feature_bc_matrix/")
+d10 <- Read10X(data.dir = "./pton10XscRNAseq/d10_filtered_feature_bc_matrix/")
+pbmc_d6 <- CreateSeuratObject(counts = d6, project = "d6", min.cells = 3, min.features = 200)
+pbmc_d8 <- CreateSeuratObject(counts = d8, project = "d8", min.cells = 3, min.features = 200)
+pbmc_d10 <- CreateSeuratObject(counts = d10, project = "d10", min.cells = 3, min.features = 200)
+pbmc_d6[["percent.mt"]] <- PercentageFeatureSet(pbmc_d6, pattern = "^MT-")
+pbmc_d8[["percent.mt"]] <- PercentageFeatureSet(pbmc_d8, pattern = "^MT-")
+pbmc_d10[["percent.mt"]] <- PercentageFeatureSet(pbmc_d10, pattern = "^MT-")
+pbmc_d6 <- subset(pbmc_d6, 
+                  subset = nFeature_RNA > 2500 & nCount_RNA > 1000 & nCount_RNA < 100000 & percent.mt < 10)
+pbmc_d8 <- subset(pbmc_d8, 
+                  subset = nFeature_RNA > 2500 & nCount_RNA > 1000 & nCount_RNA < 100000 & percent.mt < 10)
+pbmc_d10 <- subset(pbmc_d10, 
+                  subset = nFeature_RNA > 2500 & nCount_RNA > 1000 & nCount_RNA < 100000 & percent.mt < 10)
+```
+
+## Integrated analysis with published Smartseq2 datasets
+
+```{r}
+public <- CreateSeuratObject(counts = public_counts, 
+                             meta.data =metadata,
+                             min.cells = 3,
+                             min.features = 200, 
+                             project = "public")
+pbmc_list = list(pbmc_d6,pbmc_d8,pbmc_d10,public)
+for (i in 1:length(pbmc_list)) {
+  pbmc_list[[i]] <- NormalizeData(pbmc_list[[i]], verbose = FALSE)
+  pbmc_list[[i]] <- FindVariableFeatures(pbmc_list[[i]], selection.method = "vst", 
+                                         nfeatures = 2000, verbose = FALSE)
+}
+pbmc.anchors <- FindIntegrationAnchors(object.list = pbmc_list, dims = 1:30)
+pbmc.integrated <- IntegrateData(anchorset = pbmc.anchors, dims = 1:30)
+DefaultAssay(pbmc.integrated) <- "integrated"
+pbmc.integrated@meta.data$phenotype[1:6812] = "d6"
+pbmc.integrated@meta.data$phenotype[6813:13987] = "d8"
+pbmc.integrated@meta.data$phenotype[13988:21022] = "d10"
+```
+
+## Dimensionality reduction and cell clustering
+
+```{r}
+pbmc.integrated <- ScaleData(pbmc.integrated)
+pbmc.integrated <- RunPCA(pbmc.integrated, npcs = 30)
+ElbowPlot(pbmc.integrated,ndims = 30)
+pbmc.integrated <- RunUMAP(pbmc.integrated, reduction = "pca", dims = 1:10)
+DimPlot(pbmc.integrated, reduction = "umap", 
+        group.by = "phenotype",
+        cols = c("#F8766D","#FF7F00","#00BF7D","#225EA8","#984EA3"),
+        pt.size = 0.6) + xlim(-12,12) + ylim(-12,12) +coord_fixed()
+pbmc.integrated = FindNeighbors(pbmc.integrated, reduction = "pca", dims = 1:10)
+pbmc.integrated = FindClusters(pbmc.integrated, resolution = 0.8) 
+DimPlot(pbmc.integrated, reduction = "umap", group.by = "seurat_clusters",label = TRUE)
+```
+
+## Examples of gene expression plot on UMAP
+
+```{r}
+FeaturePlot(object = pbmc.integrated, 
+            features = c("GATA2"), 
+            reduction = "umap",
+            order = T,
+            pt.size = 0.6) + scale_color_gradientn(colors = c("grey85","grey85", brewer.pal(9, "OrRd")[4:9])) +
+  xlim(-12,12) + ylim(-12,12) + coord_fixed()
+```
+
+## Create Monocle2 object
+
+```{r}
+pbmc.integrated$RE2_seurat_clusters = pbmc.integrated$seurat_clusters
+pbmc.integrated$RE2_seurat_clusters[pbmc.integrated$RE2_seurat_clusters == 0] = 1
+pbmc.integrated$RE2_seurat_clusters[pbmc.integrated$RE2_seurat_clusters == 2] = 1
+pbmc.integrated$RE2_seurat_clusters[pbmc.integrated$RE2_seurat_clusters == 3] = 1
+pbmc.integrated$RE2_seurat_clusters[pbmc.integrated$RE2_seurat_clusters == 6] = 4
+pbmc.integrated$RE2_seurat_clusters = factor(pbmc.integrated$RE2_seurat_clusters)
+pbmc.integrated_monocle = pbmc.integrated
+pbmc.integrated_monocle@meta.data$batch = factor(pbmc.integrated_monocle@meta.data$batch)
+data <- as(as.matrix(pbmc.integrated_monocle@assays$RNA@counts), 'sparseMatrix') 
+pd <- new('AnnotatedDataFrame', data = pbmc.integrated_monocle@meta.data)
+fData <- data.frame(gene_short_name = row.names(data), row.names = row.names(data))
+fd <- new('AnnotatedDataFrame', data = fData)
+monocle_cds <- newCellDataSet(data,
+                              phenoData = pd,
+                              featureData = fd,
+                              lowerDetectionLimit = 0.5,
+                              expressionFamily = negbinomial.size())
+monocle_cds <- estimateSizeFactors(monocle_cds)
+monocle_cds <- estimateDispersions(monocle_cds) 
+monocle_cds <- detectGenes(monocle_cds, min_expr = 0.1)
+```
+
+## Tracjectory inference 
+
+```{r}
+expressed_genes <- row.names(subset(fData(monocle_cds),
+                                    num_cells_expressed >= 10))
+clustering_DEG_genes <-
+  differentialGeneTest(monocle_cds[expressed_genes,],
+                       fullModelFormulaStr = '~RE2_seurat_clusters + batch',
+                       reducedModelFormulaStr = "~batch",
+                       cores = 5) 
+my_ordering_genes <- row.names(clustering_DEG_genes)[order(clustering_DEG_genes$qval)][1:500]
+monocle_cds <- setOrderingFilter(monocle_cds,ordering_genes = my_ordering_genes)
+monocle_cds <- reduceDimension(monocle_cds, 
+                               reduction_method = "DDRTree",
+                               max_components = 3,
+                               residualModelFormulaStr = "~batch")
+monocle_cds <- orderCells(monocle_cds)
+monocle_cds <- orderCells(monocle_cds, root_state = "4")
+plot_cell_trajectory(monocle_cds, color_by = "RE2_seurat_clusters",
+                     theta = 150,show_branch_points = F,cell_link_size = 1) + 
+  facet_wrap(~RE2_seurat_clusters, nrow = 4) + theme(legend.position="right")
+plot_complex_cell_trajectory(monocle_cds, color_by = 'RE2_seurat_clusters', 
+                             show_branch_points = T,cell_link_size = 1.5, 
+                             root_states = c(4),cell_size = 1.5) + theme(legend.position="right")
+```
+
+## BEAM analysis
+
+```{r}
+genes = read.csv2(file = "./pton10XscRNAseq/plus_CR_naiveprimed/monocle2/TF+Epigenes.csv",
+                  header = T,sep = ",")
+genes1 = BEAM_res[rownames(BEAM_res) %in% genes$Symbol,]
+genes2 = BEAM_res2[rownames(BEAM_res2) %in% genes$Symbol,]
+my_heatmap <- plot_multiple_branches_heatmap(monocle_cds[unique(c(row.names(subset(genes1,qval < 1e-10)),
+                                                    row.names(subset(genes2,qval < 1e-10)))),],
+                               branches = c(5,2,1),
+                               branches_name = c("PrE", "TE", "Naive"),
+                               show_rownames = F,
+                               num_clusters = 10,
+                               cores = 10,
+                               return_heatmap = TRUE)
+plot_genes_branched_pseudotime(monocle_cds[c("GATA2","GATA3","HAND1"),],
+                               branch_point = 2,
+                               color_by = "RE2_seurat_clusters",
+                               ncol = 3,
+                               cell_size = 1,
+                               panel_order = c("GATA2","GATA3","HAND1"))
+plot_genes_branched_pseudotime(monocle_cds[c("NANOG","PRDM14","DNMT3L"),],
+                               branch_point = 2,
+                               color_by = "RE2_seurat_clusters",
+                               ncol = 3,
+                               cell_size = 1,
+                               panel_order = c("NANOG","PRDM14","DNMT3L"))
+plot_genes_branched_pseudotime(monocle_cds[c("GATA6","FGFR2","PITX1"),],
+                               branch_point = 1,
+                               color_by = "RE2_seurat_clusters",
+                               ncol = 3,
+                               cell_size = 1,
+                               panel_order = c("GATA6","FGFR2","PITX1"))
+```
+
